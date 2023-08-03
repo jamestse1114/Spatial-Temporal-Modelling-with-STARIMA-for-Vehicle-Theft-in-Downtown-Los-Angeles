@@ -1,0 +1,1120 @@
+---
+title: "Spatial-temporal Modelling for weekly and monthly Vehicle Theft in Los Angeles Downtown from 2010 to 2022 with STARIMA"
+---
+
+```{r include=FALSE}
+options(timeout = 1000000)
+options(R_MAX_MEMORY_SIZE = "16G")
+library(sparr)
+library(lubridate)
+library(janitor)
+library(tibble)
+library(readr)
+library(tidyr)
+library(dplyr)
+library(rgdal)
+library(sp)
+library(sf)
+library(stars)
+library(spacetime)
+library(spdep)
+library(tmap)
+library(tmaptools)
+library(ggplot2)
+library(gridExtra)
+library(readr)
+library(curl)
+library(forecast)
+library(tidyverse)
+library(reshape)
+library(lattice)
+library(gstat)
+source('starima_package.R')
+```
+
+## Data Processing
+
+This part is mainly about aggregating the crime point data into neighbourhoods, and turn the neighbourhood observations into time-series data. If you just want to read the processed files, you can skip to the next session.
+
+#### Neighbourhood shapefile
+
+```{r include=FALSE}
+# LA neighborhood sf objects
+neighborhood_sf <- st_read("./neighborhood_reduced/neighborhood_reduced.shp")
+neighborhood_sf <- subset(neighborhood_sf, select=c(name, geometry))
+```
+
+#### Crime events point data
+
+```{r include=FALSE}
+# Download and Combine the crime data
+crime_data <- rbind(read_csv("https://data.lacity.org/api/views/63jg-8b9z/rows.csv?accessType=DOWNLOAD"), read_csv("https://data.lacity.org/api/views/2nrs-mtv8/rows.csv?accessType=DOWNLOAD"))
+crime_data <- clean_names(crime_data)
+crime_data <- subset(crime_data, select= -c(date_rptd, area, area_name, rpt_dist_no, part_1_2, crm_cd, mocodes, premis_cd, weapon_desc, weapon_used_cd, status, status_desc, crm_cd_1, crm_cd_2, crm_cd_3, crm_cd_4, location, cross_street, time_occ, vict_age, vict_sex, vict_descent, premis_desc))
+
+# Add a time stamp column, and remove the data before 2010 and after 2022
+crime_data$timestamp <- as.POSIXct(crime_data$date_occ, format = "%m/%d/%Y %I:%M:%S %p", tz = "America/Los_Angeles")
+crime_data <- crime_data %>% filter(timestamp <= as.POSIXct("2022-12-31 23:59:59", tz = "America/Los_Angeles"))
+crime_data <- crime_data %>% filter(timestamp >= as.POSIXct("2010-01-01 00:00:00", tz = "America/Los_Angeles"))
+```
+
+#### Filtering Vehicle Theft Events crimes
+
+```{r include=FALSE}
+# Filter crime events with only "VEHICLE - STOLEN"
+crime_data <- crime_data %>%
+  filter(grepl("VEHICLE - STOLEN", crm_cd_desc, fixed = FALSE))
+
+# Export the crime_data to a CSV file for quicker loading
+write.csv(crime_data, "./crime_data/crime_data.csv")
+
+crime_data <- read.csv("./crime_data/crime_data.csv")
+```
+
+```{r include=FALSE}
+# Convert the data into an sf object
+coordinates(crime_data) <- ~lon + lat
+proj4string(crime_data) <- CRS("+proj=longlat +datum=WGS84")
+crime_sf <- crime_data %>% st_as_sf(coords = c("lon", "lat"), crs = 4326)
+```
+
+#### Spatial Joining the point events and the neighbourhood shapefile
+
+```{r include=FALSE}
+neighborhood_sf <- st_transform(neighborhood_sf, crs = st_crs(crime_sf))
+# Spatial joining the tracts and the crime events
+crime_neigh <- st_join(neighborhood_sf, crime_sf)
+st_write(crime_neigh, "./crime_neigh/crime_neigh.shp")
+```
+
+```{r include=FALSE}
+# Read the crime_data and crime_neigh (combined data)
+crime_data <- read.csv("./crime_data/crime_data.csv")
+
+crime_neigh <- st_read("./crime_neigh/crime_neigh.shp")
+crime_neigh <- subset(crime_neigh, select = -c(X_1, X, dr_no, crm_cd_))
+```
+
+#### Aggregate Vehicle Theft Events by neighbourhood by each week
+
+```{r include=FALSE}
+crime_neigh$date <- as.Date(crime_neigh$timstmp)
+crime_neigh$week <- format(crime_neigh$date, format = "%Y-%U")
+
+# Group by name (crime_neigh) and week, and calculate the crime counts
+crime_counts_week <- crime_neigh %>%
+  group_by(name, week) %>%
+  summarise(crime_count = n()) %>%
+  ungroup()
+
+# Pivot the data to have census tracts as rows and weeks as columns
+crime_counts_week$week <- as.character(crime_counts_week$week)
+crime_counts_week <- as.data.frame(crime_counts_week)
+
+# Pivot the data to have census tracts as rows and weeks as columns
+crime_neigh_week <- crime_counts_week %>%
+  spread(key = week, value = crime_count)
+
+crime_neigh_week[is.na(crime_neigh_week)] <- 0
+
+st_write(crime_neigh_week, "./crime_neigh_week/crime_neigh_week.shp")
+```
+
+```{r include=FALSE}
+crime_neigh_week <- st_read("./crime_neigh_week/crime_neigh_week.shp")
+```
+
+#### Aggregate Vehicle Theft Events by neighbourhood by each month
+
+```{r include=FALSE}
+crime_neigh$date <- as.Date(crime_neigh$timstmp)
+crime_neigh$month <- format(crime_neigh$date, format = "%Y-%m")
+
+# Group by name (crime_neigh) and week, and calculate the crime counts
+crime_counts_month <- crime_neigh %>%
+  group_by(name, month) %>%
+  summarise(crime_count = n()) %>%
+  ungroup()
+
+crime_counts_month$month <- as.character(crime_counts_month$month)
+crime_counts_month <- as.data.frame(crime_counts_month)
+
+# Pivot the data to have census tracts as rows and weeks as columns
+crime_neigh_month <- crime_counts_month %>%
+  spread(key = month, value = crime_count)
+
+crime_neigh_month[is.na(crime_neigh_month)] <- 0
+crime_neigh_month <- crime_neigh_month[, -ncol(crime_neigh_month)]
+
+st_write(crime_neigh_month, "./crime_neigh_month/crime_neigh_month.shp")
+```
+
+```{r include=FALSE}
+crime_neigh_month <- st_read("./crime_neigh_month/crime_neigh_month.shp")
+```
+
+## Data Exploration
+
+```{r include=FALSE}
+crime_data <- read.csv("./crime_data/crime_data.csv")
+crime_neigh_month <- st_read("./crime_neigh_month/crime_neigh_month.shp")
+crime_neigh_week <- st_read("./crime_neigh_week/crime_neigh_week.shp")
+```
+
+#### Detecting trend, seasonality, residual with decompsition
+
+```{r}
+# Convert your crime data into a time series object
+crime_data$date <- as.Date(crime_data$timestamp)
+crime_data$week <- floor_date(crime_data$date, unit = "week")
+crime_data$month <- floor_date(crime_data$date, unit = "month")
+crime_data$year <- floor_date(crime_data$date, unit = "year")
+
+# Aggregating crime counts into daily, weekly and monthly
+daily_crime <- aggregate(crime_data$date, by = list(crime_data$date), FUN = length)
+weekly_crime <- crime_data %>%
+  group_by(week) %>%
+  summarise(crime_count = n())
+monthly_crime <- crime_data %>%
+  group_by(month) %>%
+  summarise(crime_count = n())
+yearly_crime <- crime_data %>%
+  group_by(year) %>%
+  summarise(crime_count = n())
+
+# Convert to a time series object
+t_daily <- ts(daily_crime$x, frequency = 365)
+t_weekly <- ts(weekly_crime$crime_count, frequency = 52)
+t_monthly <- ts(monthly_crime$crime_count, frequency = 12)
+
+# Plotting the trend, seasonal, and residual in daily, weekly, monthly
+par(mfrow = c(4, 1), mar = c(2, 4, 2, 1))
+plot(stl(t_daily, s.window = "periodic"), main = "Daily Vehicle Theft Plot")
+plot(stl(t_weekly, s.window = "periodic"), main = "Weekly Vehicle Theft Plot")
+plot(stl(t_monthly, s.window = "periodic"), main = "Monthly Vehicle Theft Plot")
+```
+
+#### Plot Theft Crimes by Year, Month and Week
+
+```{r}
+year_ggplot <- ggplot(yearly_crime, aes(x = year, y = crime_count)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Yearly Vehicle Theft Crime Counts",
+       x = "Month",
+       y = "Crime Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+month_ggplot <- ggplot(monthly_crime, aes(x = month, y = crime_count)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Monthly Vehicle Theft Crime Counts",
+       x = "Month",
+       y = "Crime Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+week_ggplot <- ggplot(weekly_crime, aes(x = week, y = crime_count)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Weekly Vehicle Theft Crime Counts",
+       x = "Week",
+       y = "Crime Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+grid.arrange(year_ggplot, month_ggplot, week_ggplot, nrow = 3)
+```
+
+#### Plot the average Vehicle Theft by neighbourhood at different time span
+
+Yearly
+```{r}
+crime_neigh_month <- as.data.frame(crime_neigh_month)
+crime_neigh_month$total_crime <- rowSums(crime_neigh_month[, 2:156])
+crime_neigh_month$average_crime <- crime_neigh_month$total_crime / 13
+
+neigh_average_crime <- st_as_sf(crime_neigh_month) %>%
+  select(name, geometry, average_crime)
+
+top5_neigh <- neigh_average_crime %>% 
+  top_n(5, wt = average_crime) %>% 
+  pull(name)
+
+neigh_average_crime$label <- ifelse(neigh_average_crime$name %in% top5_neigh, as.character(neigh_average_crime$name), "")
+
+tm_shape(neigh_average_crime) +
+  tm_polygons(
+    col = "average_crime",
+    palette = "Reds",
+    border.col = "white",
+    lwd = 0.05,
+    title = "Average Count",
+    text.size = 10 
+  ) +
+  tm_text("label", size = 0.5, col = "black", auto.placement = TRUE) + 
+  tm_layout(
+    main.title = "Average Yearly Theft Crime from 2010 to 2022",
+    main.title.position = c("center", "top"),
+    main.title.size = 0.8,
+    legend.position = c("left", "bottom"),
+    legend.title.size = 0.65,
+    legend.text.size = 0.5,
+  ) +
+  tm_scale_bar(position = c("right", "bottom"),
+               text.size = 0.5) +
+  tm_compass(position = c("right", "top"),
+             size = 0.7)
+```
+#### List the top 10 neighbourhoods with the highest average weekly count of Theft Crime
+
+```{r}
+# Get the top 10 neighbourhoods
+ranked_neigh_with_crime <- neigh_average_crime[order(-neigh_average_crime$average_crime),]
+ranked_neigh_with_crime <- ranked_neigh_with_crime[1:10,]
+
+# Plot
+ggplot(ranked_neigh_with_crime, aes(x = reorder(name, average_crime), y = average_crime)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Top 10 Neighborhoods with Highest Average Weekly Theft Crime",
+       x = "Neighborhood",
+       y = "Average Yearly Crime from 2010 to 2022") +
+  coord_flip()
+```
+
+Monthly 
+```{r}
+crime_neigh_month <- as.data.frame(crime_neigh_month)
+crime_neigh_month$total_crime <- rowSums(crime_neigh_month[, 2:156])
+crime_neigh_month$average_crime <- rowMeans(crime_neigh_month[, 2:156])
+
+neigh_average_crime <- st_as_sf(crime_neigh_month) %>%
+  select(name, geometry, average_crime)
+
+top5_neigh <- neigh_average_crime %>% 
+  top_n(5, wt = average_crime) %>% 
+  pull(name)
+
+neigh_average_crime$label <- ifelse(neigh_average_crime$name %in% top5_neigh, as.character(neigh_average_crime$name), "")
+
+tm_shape(neigh_average_crime) +
+  tm_polygons(
+    col = "average_crime",
+    palette = "Reds",
+    border.col = "white",
+    lwd = 0.05,
+    title = "Average Count",
+    text.size = 10 
+  ) +
+  tm_text("label", size = 0.5, col = "black", auto.placement = TRUE) + 
+  tm_layout(
+    main.title = "Average Monthly Theft Crime from 2010 to 2022",
+    main.title.position = c("center", "top"),
+    main.title.size = 0.76,
+    legend.position = c("left", "bottom"),
+    legend.title.size = 0.65,
+    legend.text.size = 0.5,
+  ) +
+  tm_scale_bar(position = c("right", "bottom"),
+               text.size = 0.5) +
+  tm_compass(position = c("right", "top"),
+             size = 0.7)
+```
+#### List the top 10 neighbourhoods with the highest average weekly count of Theft Crime
+
+```{r}
+# Get the top 10 neighbourhoods
+ranked_neigh_with_crime <- neigh_average_crime[order(-neigh_average_crime$average_crime),]
+ranked_neigh_with_crime <- ranked_neigh_with_crime[1:10,]
+
+# Plot
+ggplot(ranked_neigh_with_crime, aes(x = reorder(name, average_crime), y = average_crime)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Top 10 Neighborhoods with Highest Average Monthly Theft Crime",
+       x = "Neighborhood",
+       y = "Average Theft Crime from 2010 to 2022") +
+  coord_flip()
+```
+
+Weekly
+```{r}
+crime_neigh_week <- as.data.frame(crime_neigh_week)
+crime_neigh_week$average_crime <- rowMeans(crime_neigh_week[, 2:690])
+
+neigh_average_crime <- st_as_sf(crime_neigh_week) %>%
+  select(name, geometry, average_crime)
+crime_neigh_week <- st_read("./crime_neigh_week/crime_neigh_week.shp")
+
+top5_neigh <- neigh_average_crime %>% top_n(5, wt = average_crime) %>% pull(name)
+
+neigh_average_crime$label <- ifelse(neigh_average_crime$name %in% top5_neigh, as.character(neigh_average_crime$name), "")
+
+tm_shape(neigh_average_crime) +
+  tm_polygons(
+    col = "average_crime",
+    palette = "Reds",
+    border.col = "white",
+    lwd = 0.05,
+    title = "Average Count",
+    text.size = 10 
+  ) +
+  tm_text("label", size = 0.5, col = "black", auto.placement = TRUE) + 
+  tm_layout(
+    main.title = "Average Weekly Theft Crime from 2010 to 2022",
+    main.title.position = c("center", "top"),
+    main.title.size = 0.78,
+    legend.position = c("left", "bottom"),
+    legend.title.size = 0.65,
+    legend.text.size = 0.5,
+  ) +
+  tm_scale_bar(position = c("right", "bottom"),
+               text.size = 0.5) +
+  tm_compass(position = c("right", "top"),
+             size = 0.7)
+```
+
+#### List the top 10 neighbourhoods with the highest average weekly count of Theft Crime
+
+```{r}
+# Get the top 10 neighbourhoods
+ranked_neigh_with_crime <- neigh_average_crime[order(-neigh_average_crime$average_crime),]
+ranked_neigh_with_crime <- ranked_neigh_with_crime[1:10,]
+
+# Plot
+ggplot(ranked_neigh_with_crime, aes(x = reorder(name, average_crime), y = average_crime)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Top 10 Neighborhoods with Highest Average Weekly Theft Crime",
+       x = "Neighborhood",
+       y = "Average Theft Crime from 2010 to 2022") +
+  coord_flip()
+```
+
+#### Plotting the distribution
+
+```{r}
+crime_neigh_week_df <- as.data.frame(crime_neigh_week)
+week_matrix <- subset(crime_neigh_week_df, select=-c(name, geometry)) %>% data.matrix()
+
+
+mean_week = mean(week_matrix)
+mean_week
+
+sdev = sd(week_matrix)
+sdev
+
+hist(week_matrix, breaks = 50, xlab = "Neighbourhood", main = "Distribution of Weekly Vehicle Theft by Neighbourhood")
+abline(v = mean_week, col = "red")
+```
+
+```{r}
+crime_neigh_month_df <- as.data.frame(crime_neigh_month)
+month_matrix <- subset(crime_neigh_month_df, select=-c(name, geometry)) %>% data.matrix()
+month_matrix <- month_matrix[, -c((ncol(month_matrix)-1):ncol(month_matrix))]
+
+mean_month = mean(month_matrix)
+mean_month
+
+sdev = sd(month_matrix)
+sdev
+
+hist(month_matrix, breaks = 50, xlab = "Neighbourhood", main = "Distribution of Monthly Vehicle Theft by Neighbourhood")
+abline(v = mean_week, col = "red")
+```
+
+```{r}
+plot(colMeans(week_matrix), xlab = "Year", ylab = "Vehicle Theft Counts", type = "l", xaxt = "n")
+axis(1, at = seq(1, as.numeric(difftime(as.Date("2022-12-31"), as.Date("2010-01-01"), units = "weeks")), by = (as.numeric(difftime(as.Date("2022-12-31"), as.Date("2010-01-01"), units = "weeks")) / 13)), , main = "Trend of Weekly Vehicle Theft from 2010 to 2022", labels = seq(2010, 2022, 1))
+```
+
+#### Heatmap for all neighbourhoods from 2010 to 2022
+
+```{r}
+heatmap(week_matrix,Rowv=NA,Colv=NA, col=heat.colors(256),scale="column", margins=c(5,3),xlab="Year",ylab="Neighbourhood", cexCol=1.1,y.scale.components.subticks(n=10))
+```
+
+#### Spatial Autocorrelation
+
+```{r}
+crime_neigh_week <- as.data.frame(crime_neigh_week)
+crime_neigh_week$total_crime <- rowSums(crime_neigh_week[, c(2:690)])
+crime_neigh_week$average_crime <- crime_neigh_week$total_crime / 689
+crime_neigh_week <- st_as_sf(crime_neigh_week)
+
+nb <- poly2nb(crime_neigh_week, queen = TRUE, snap = 0.2)
+wm <- nb2listw(nb, style = "W")
+
+average_weekly_crime_neighbourhood <- crime_neigh_week$average_crime
+moran_result <- moran.test(average_weekly_crime_neighbourhood, wm)
+print(moran_result)
+```
+
+#### Local Moran's I
+
+Downtown
+```{r}
+# Find the index of the "Downtown" neighborhood
+id <- which(crime_neigh_week$name == "Downtown")
+local_moran <- localmoran(crime_neigh_week$average_crime, wm)
+
+# Extract the Local Moran's I statistic, Z-score, and p-value for the "Downtown" neighborhood
+moran <- local_moran[id, 1]
+zscore <- local_moran[id, 2]
+pvalue <- local_moran[id, 3]
+
+# Display the results
+cat("Downtown Local Moran's I: ", moran, "\n")
+cat("Downtown Z-score: ", zscore, "\n")
+cat("Downtown P-value: ", pvalue)
+```
+
+Boyle Heights
+```{r}
+# Find the index of the "Boyle Heights" neighborhood
+id <- which(crime_neigh_week$name == "Boyle Heights")
+local_moran <- localmoran(crime_neigh_week$average_crime, wm)
+
+# Extract the Local Moran's I statistic, Z-score, and p-value for the "Downtown" neighborhood
+moran <- local_moran[id, 1]
+zscore <- local_moran[id, 2]
+pvalue <- local_moran[id, 3]
+
+# Display the results
+cat("Boyle Heights Local Moran's I: ", moran, "\n")
+cat("Boyle Heights Z-score: ", zscore, "\n")
+cat("Boyle Heights P-value: ", pvalue)
+```
+
+#### Local Moran's I Hotspot Coldspot
+
+```{r}
+lm <- localmoran(crime_neigh_week$average_crime, wm)
+
+hotspots <- which(lm[[2]] >= 1.96)
+coldspots <- which(lm[[2]] <= -1.96)
+
+hotspot_names <- crime_neigh_week$name[hotspots]
+coldspot_names <- crime_neigh_week$name[coldspots]
+
+crime_neigh_week$spot_type <- "Neither"
+crime_neigh_week$spot_type[hotspots] <- "Hotspot"
+crime_neigh_week$spot_type[coldspots] <- "Coldspot"
+
+tm_shape(crime_neigh_week) +
+  tm_fill(col = "spot_type", 
+          palette = "Reds",
+          title = "Spot Type",
+          legend.show = TRUE) +
+  tm_borders() +
+  tm_layout(
+            main.title = "Local Moran's I Hotspots and Coldspots of Average Weekly Vehicle Theft",
+            main.title.position = c("center", "top"),
+            main.title.size = 0.7,
+            legend.position = c("right", "bottom"),
+            legend.title.size = 0.65,
+            legend.text.size = 0.65,
+            legend.outside = TRUE ) +
+  tm_scale_bar(position = c("left", "bottom"),
+               text.size = 0.5) +
+  tm_compass(position = c("right", "top"),
+             size = 0.7)
+
+```
+
+#### Getis-Ord Gi* statistic Hotspot Coldspot - Weekly
+
+"Central-Alameda" 
+"Downtown"
+"Pico-Union"
+"South Park"
+"Valley Glen" "Westlake"
+
+```{r}
+gi_ord <- localG(crime_neigh_week$average_crime, wm)
+crit_value <- qnorm(0.975, mean(gi_ord), sd(gi_ord))
+
+hotspot_indices_gi <- which(gi_ord >= crit_value)
+coldspot_indices_gi <- which(gi_ord <= -crit_value)
+
+hotspot_names_gi <- crime_neigh_week$name[hotspot_indices_gi]
+coldspot_names_gi <- crime_neigh_week$name[coldspot_indices_gi]
+
+crime_neigh_week$spot_type_gi <- "Neither"
+crime_neigh_week$spot_type_gi[hotspot_indices_gi] <- "Hotspot"
+crime_neigh_week$spot_type_gi[coldspot_indices_gi] <- "Coldspot"
+crime_neigh_week$hotspot_label <- NA
+crime_neigh_week$hotspot_label[hotspot_indices_gi] <- crime_neigh_week$name[hotspot_indices_gi]
+
+print(crime_neigh_week$hotspot_label[hotspot_indices_gi])
+
+tm_shape(crime_neigh_week) +
+  tm_fill(col = "spot_type_gi", 
+          palette = c("Neither" = "#D3D3D3", "Coldspot" = "#2C7BB6", "Hotspot" = "#D7191C"),
+          title = "Type",
+          border.col = "white",
+          lwd = 0.1,
+          legend.show = TRUE) +
+  tm_borders() +
+  tm_text("hotspot_label", size = 0.45, col = "black") +
+  tm_layout(
+    main.title = "Getis-Ord Gi* Hotspots of Average Weekly Vehicle Theft",
+    main.title.position = c("center", "top"),
+    main.title.size = 0.6,
+    legend.position = c("left", "bottom"),
+    legend.title.size = 0.65,
+    legend.text.size = 0.65,
+  ) +
+  tm_view(bbox = st_bbox(crime_neigh_week)) +
+  tm_scale_bar(position = c("right", "bottom"),
+               text.size = 0.5) +
+  tm_compass(position = c("right", "top"),
+             size = 0.7)
+```
+
+#### Getis-Ord Gi* statistic Hotspot Coldspot - Monthly
+
+"Central-Alameda"
+"Downtown"        
+"Pico-Union"      
+"South Park"      
+"Valley Glen"     
+"Westlake" 
+
+```{r}
+gi_ord <- localG(crime_neigh_month$average_crime, wm)
+crit_value <- qnorm(0.975, mean(gi_ord), sd(gi_ord))
+
+hotspot_indices_gi <- which(gi_ord >= crit_value)
+coldspot_indices_gi <- which(gi_ord <= -crit_value)
+
+hotspot_names_gi <- crime_neigh_month$name[hotspot_indices_gi]
+coldspot_names_gi <- crime_neigh_month$name[coldspot_indices_gi]
+
+crime_neigh_month$spot_type_gi <- "Neither"
+crime_neigh_month$spot_type_gi[hotspot_indices_gi] <- "Hotspot"
+crime_neigh_month$spot_type_gi[coldspot_indices_gi] <- "Coldspot"
+crime_neigh_month$hotspot_label <- NA
+crime_neigh_month$hotspot_label[hotspot_indices_gi] <- crime_neigh_month$name[hotspot_indices_gi]
+
+crime_neigh_month <- st_as_sf(crime_neigh_month)
+
+print(crime_neigh_month$hotspot_label[hotspot_indices_gi])
+
+tm_shape(crime_neigh_month) +
+  tm_fill(col = "spot_type_gi", 
+          palette = c("Neither" = "#D3D3D3", "Coldspot" = "#2C7BB6", "Hotspot" = "#D7191C"),
+          title = "Type",
+          border.col = "white",
+          lwd = 0.1,
+          legend.show = TRUE) +
+  tm_borders() +
+  tm_text("hotspot_label", size = 0.45, col = "black") +
+  tm_layout(
+    main.title = "Getis-Ord Gi* Hotspots of Average Weekly Vehicle Theft",
+    main.title.position = c("center", "top"),
+    main.title.size = 0.6,
+    legend.position = c("left", "bottom"),
+    legend.title.size = 0.65,
+    legend.text.size = 0.65,
+  ) +
+  tm_view(bbox = st_bbox(crime_neigh_week)) +
+  tm_scale_bar(position = c("right", "bottom"),
+               text.size = 0.5) +
+  tm_compass(position = c("right", "top"),
+             size = 0.7)
+```
+
+#### Weekly mean - ACF Plot
+
+```{r}
+Weekly_mean <- colMeans(as.data.frame(crime_neigh_week)[,2:690])
+acf(Weekly_mean)
+```
+
+#### Monthly mean - ACF Plot
+
+```{r}
+Monthly_mean <- colMeans(as.data.frame(crime_neigh_month)[,2:156])
+acf(Monthly_mean)
+```
+
+#### Weekly mean - PACF Plot
+
+```{r}
+pacf(Weekly_mean)
+```
+
+#### Monthly mean - PACF Plot
+
+```{r}
+pacf(Monthly_mean)
+```
+
+#### Weekly-mean Auto-ARIMA
+
+```{r}
+# Use auto.arima() function to find the best ARIMA model
+best_model <- auto.arima(Weekly_mean, stepwise = FALSE, approximation = FALSE)
+
+# Display the best ARIMA model
+summary(best_model)
+
+# Residuals' ACF plot
+ggAcf(residuals(best_model)) + ggtitle("Residuals' Autocorrelation Function (ACF) Plot") + theme(plot.title = element_text(hjust = 0.5))
+
+# Residuals' PACF plot
+ggPacf(residuals(best_model)) + ggtitle("Residuals' Partial Autocorrelation Function (PACF) Plot") + theme(plot.title = element_text(hjust = 0.5))
+
+# Forecast the next 12 time periods
+future_forecast <- forecast(best_model, h = 12)
+
+# Plot the forecast
+autoplot(future_forecast) + ggtitle("ARIMA Model Forecast") + theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+#### Downtown neighbourhood - Weekly
+
+```{r}
+# Transpose the DOWNTOWN row
+downtown_row <- crime_neigh_week[crime_neigh_week$name == "Downtown", ]
+downtown_row <- as.data.frame(downtown_row)
+downtown_row <- downtown_row[, -c(ncol(downtown_row)-1, ncol(downtown_row))]
+downtown_row <- as.data.frame(t(downtown_row))
+colnames(downtown_row) <- as.character(downtown_row[1, ])
+downtown_column <- downtown_row[-1, , drop = FALSE]
+downtown_column <- slice(downtown_column, 1:(nrow(downtown_column) - 2))
+downtown_column <- downtown_column[1:(nrow(downtown_column) - 2), ]
+downtown_column <- as.data.frame(downtown_column)
+downtown_column <- gather(downtown_column, key = "Date", value = "Downtown")
+downtown_column <- subset(downtown_column, select = -c(Date))
+
+plot(downtown_column$Downtown, ylab="Weekly Counts", xlab="Time in Weeks", type="l", main="Weekly vehicle theft crime from 2010 to 2022")
+```
+
+The dependence between consecutive observations is linear.
+
+```{r}
+str(downtown_column)
+downtown_column$Downtown <- as.numeric(downtown_column$Downtown)
+lag.plot(downtown_column$Downtown, lags=3, do.lines=FALSE)
+```
+
+#### ACF
+
+it indicates that there is significant positive autocorrelation in the data. This means that there is a strong relationship between the current observation and the previous observations in the time series, and this relationship can be used to make predictions about future values of the time series.
+
+There is no strong cyclic pattern in the autocorrelation for the Downtown weekly plot.
+
+```{r}
+acf(downtown_column$Downtown, lag.max=52, xlab="Lag", ylab="ACF",
+main="Autocorrelation plot of weekly vehicle theft crime")
+
+```
+
+After two difference, lag autocorrelation is reduced
+
+```{r}
+downtown_column.diff.Downtown <- diff(downtown_column$Downtown, lag=52, differences=2)
+
+acf(downtown_column.diff.Downtown, lag.max=52, xlab="Lag", ylab="ACF",
+main="Autocorrelation plot of weekly vehicle theft crime")
+```
+
+#### PACF
+
+Following shows the partial autocorrelation plot of the monthly average temperature in East Anglia.
+
+```{r}
+pacf(downtown_column$Downtown, lag.max=52,xlab="Lag",ylab="PACF",main=
+"Partial Autocorrelation plot of weekly vehicle theft crime")
+```
+
+#### ARIMA and Seasonality
+
+If the ACF decays to zero and the first 52 lags are above the confidence level, while the PACF cuts off after lag 4, it suggests that the data might have a seasonal component along with an autoregressive (AR) component.
+
+```{r}
+auto_arima <- auto.arima(downtown_column$Downtown[1:417], seasonal = TRUE)
+print(auto_arima)
+```
+
+#### NRMSE
+
+```{r}
+NRMSE_fit <- NRMSE(res=auto_arima$residuals, obs=downtown_column$Downtown[1:417])
+print(NRMSE_fit)
+```
+
+#### Diagnostic Checking
+
+```{r}
+tsdiag(auto_arima)
+```
+
+In general, if the p-value is less than a predefined significance level (e.g., 0.05), we reject the null hypothesis and conclude that there is evidence of autocorrelation in the residuals. However, in your case, the p-value is 0.9723, which is much greater than 0.05. This means that there is no evidence to reject the null hypothesis, so we can't conclude that there is autocorrelation in the residuals of the auto_arima model. This suggests that the model has captured the temporal dependencies in the data reasonably well.
+
+```{r}
+Box.test(auto_arima$residuals,lag=1)
+Box.test(auto_arima$residuals,lag=2)
+Box.test(auto_arima$residuals,lag=3)
+```
+
+```{r}
+pre.auto <-predict(auto_arima, n.ahead=12)
+print(pre.auto)
+
+length(downtown_column$Downtown[418:429])
+length(pre.auto$pred)
+```
+
+```{r}
+matplot(1:12,cbind(downtown_column$Downtown[418:429],pre.auto$pred),type="l",main= "ARIMA prediction effect with 2014 to 2020")
+```
+
+#### Downtown neighbourhood - Monthly
+
+```{r}
+# Transpose the DOWNTOWN row
+downtown_row_m <- crime_neigh_month[crime_neigh_month$name == "Downtown", ]
+downtown_row_m <- as.data.frame(downtown_row_m)
+downtown_row_m <- downtown_row_m[, -c(ncol(downtown_row_m)-1, ncol(downtown_row_m))]
+downtown_row_m <- as.data.frame(t(downtown_row_m))
+colnames(downtown_row_m) <- as.character(downtown_row_m[1, ])
+downtown_row_m <- downtown_row_m[-1, , drop = FALSE]
+downtown_row_m <- slice(downtown_row_m, 1:(nrow(downtown_row_m) - 2))
+downtown_row_m <- downtown_row_m[1:(nrow(downtown_row_m) - 2), ]
+downtown_row_m <- as.data.frame(downtown_row_m)
+downtown_row_m <- gather(downtown_row_m, key = "Date", value = "Downtown")
+downtown_row_m <- subset(downtown_row_m, select = -c(Date))
+
+plot(downtown_row_m$Downtown, ylab="Monthly Counts", xlab="Time in Months", type="l", main="Monthly vehicle theft crime from 2010 to 2022")
+```
+
+The dependence between consecutive observations is linear.
+
+```{r}
+str(downtown_row_m)
+downtown_row_m$Downtown <- as.numeric(downtown_row_m$Downtown)
+lag.plot(downtown_row_m$Downtown, lags=3, do.lines=FALSE)
+```
+
+#### ACF
+
+it indicates that there is significant positive autocorrelation in the data. This means that there is a strong relationship between the current observation and the previous observations in the time series, and this relationship can be used to make predictions about future values of the time series.
+
+There is no strong cyclic pattern in the autocorrelation for the Downtown weekly plot.
+
+```{r}
+acf(downtown_row_m$Downtown, lag.max=52, xlab="Lag", ylab="ACF",
+main="Autocorrelation plot of weekly vehicle theft crime")
+
+```
+
+After two difference, lag autocorrelation is reduced
+
+```{r}
+downtown_row_m.diff.Downtown <- diff(downtown_row_m$Downtown, lag=52, differences=1)
+
+acf(downtown_row_m.diff.Downtown, lag.max=52, xlab="Lag", ylab="ACF",
+main="Differenced Autocorrelation plot of monthly vehicle theft crime")
+```
+
+#### PACF
+
+Following shows the partial autocorrelation plot of the monthly average temperature in East Anglia.
+
+```{r}
+pacf(downtown_row_m$Downtown, lag.max=52,xlab="Lag",ylab="PACF",main=
+"Partial Autocorrelation plot of weekly vehicle theft crime")
+```
+
+#### ARIMA and Seasonality
+
+If the ACF decays to zero and the first 52 lags are above the confidence level, while the PACF cuts off after lag 4, it suggests that the data might have a seasonal component along with an autoregressive (AR) component.
+
+```{r}
+auto_arima <- auto.arima(downtown_row_m$Downtown[1:96], seasonal = TRUE)
+print(auto_arima)
+```
+
+#### NRMSE
+
+```{r}
+NRMSE_fit <- NRMSE(res=auto_arima$residuals, obs=downtown_row_m$Downtown[1:96])
+print(NRMSE_fit)
+```
+
+#### Diagnostic Checking
+
+```{r}
+tsdiag(auto_arima)
+```
+
+In general, if the p-value is less than a predefined significance level (e.g., 0.05), we reject the null hypothesis and conclude that there is evidence of autocorrelation in the residuals. However, in your case, the p-value is 0.9723, which is much greater than 0.05. This means that there is no evidence to reject the null hypothesis, so we can't conclude that there is autocorrelation in the residuals of the auto_arima model. This suggests that the model has captured the temporal dependencies in the data reasonably well.
+
+```{r}
+Box.test(auto_arima$residuals,lag=1)
+Box.test(auto_arima$residuals,lag=2)
+Box.test(auto_arima$residuals,lag=3)
+```
+
+```{r}
+pre.auto <-predict(auto_arima, n.ahead=12)
+
+
+length(downtown_row_m$Downtown[97:108])
+length(pre.auto$pred)
+print(pre.auto)
+```
+
+```{r}
+matplot(1:12,cbind(downtown_column$Downtown[97:108],pre.auto$pred),type="l",main= "ARIMA prediction effect with 2014 to 2020")
+```
+#### Space-time Semivariogram
+
+```{r include=FALSE}
+
+crime_neigh_week2 <- st_read("./crime_neigh_week/crime_neigh_week.shp")
+
+coords_centroid <- st_coordinates(st_centroid(crime_neigh_week2$geometry))
+coords_centroid <- na.omit(coords_centroid)
+
+pts <- SpatialPoints(coords_centroid[,1:2], 
+proj4string=CRS("+init=epsg:4326 +proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0"))
+
+time <- seq(as.Date("2010-01-01"), length = 689, by = "week")
+print(time)
+
+crime_neigh_week2 <- as.data.frame(crime_neigh_week2)
+crime_neigh_week2 <- crime_neigh_week2[, -ncol(crime_neigh_week2)]
+crime_neigh_week2 <- crime_neigh_week2[, 2:ncol(crime_neigh_week2)]
+crime_neigh_week2 <- as.matrix(crime_neigh_week2)
+
+stfdf <- STFDF(pts, time, data.frame(as.vector(t(crime_neigh_week2))))
+
+names(stfdf@data) <- "Crime"
+```
+
+```{r}
+ChSTVar <- variogram(Crime~1, stfdf, width=100, cutoff=100,tlags=0:10)
+```
+
+```{r}
+plot(ChSTVar)
+```
+
+γ - semivariance measures spatial and spatiotemporal dependence between observations. 
+Degree of similarity or dissimilarity between data points as a function of the distance and/or time lag between them. In other words, gamma quantifies the spatial or spatiotemporal structure of the data.
+
+A semivariogram plot displays gamma values on the vertical axis (z-axis in a 3D plot) against the distance (x-axis) and time lag (y-axis). The plot helps to visualize and understand how the spatial or spatiotemporal correlation in the data changes with increasing distance or time lag.
+
+```{r}
+ChSTVar_noNA <- ChSTVar[!is.na(ChSTVar$gamma),]
+plot(ChSTVar_noNA, wireframe=T)
+```
+
+## STARIMA - Weekly 
+
+```{r include=FALSE}
+crime_neigh_month <- st_read("./crime_neigh_month/crime_neigh_month.shp")
+crime_neigh_week <- st_read("./crime_neigh_week/crime_neigh_week.shp")
+
+crime_neigh_week_df <- as.data.frame(crime_neigh_week)
+crime_neigh_week_df <- crime_neigh_week_df[, -ncol(crime_neigh_week_df)]
+transposed_df <- as.data.frame(t(crime_neigh_week_df))
+transposed_df <- data.frame(Week = rownames(transposed_df), transposed_df)
+
+colnames(transposed_df) <- transposed_df[1, ]
+transposed_df <- transposed_df[-1, ]
+transposed_df <- transposed_df[, -1] 
+transposed_df <- data.frame(lapply(transposed_df, as.numeric))
+
+nb <- poly2nb(crime_neigh_week, queen = TRUE, snap = 0.1)
+weight_matrix <- nb2mat(nb, style = "W", zero.policy = TRUE)
+weight_matrix <- as.matrix(weight_matrix)
+rownames(weight_matrix) <- crime_neigh_week$name
+colnames(weight_matrix) <- crime_neigh_week$name
+
+weekly_crime <- transposed_df
+```
+
+#### STACF
+
+```{r}
+weekly_crime.mat <- as.matrix(weekly_crime)
+stacf(weekly_crime.mat, weight_matrix, 52)
+```
+Strong autocorrelation with next value, and quickly drop down but all above the significance level
+
+```{r}
+weekly_crime.mat.diff <- diff(weekly_crime.mat,lag=1,differences=1)
+stacf(weekly_crime.mat.diff, weight_matrix, 52)
+```
+
+#### STPACF
+
+```{r}
+stpacf(weekly_crime.mat, weight_matrix, 52)
+```
+
+```{r}
+stpacf(weekly_crime.mat.diff, weight_matrix, 52)
+```
+
+#### Fitting STARIMA (2010-2017) predict (2018-2019)
+
+```{r}
+W_fit<-list(w1=weight_matrix)
+# best parameters
+fit.star <- starima_fit(weekly_crime.mat[1:416,],W_fit,p=1,d=0,q=2)
+```
+
+```{r}
+stacf(fit.star$RES,weight_matrix,52)
+```
+
+```{r}
+hist(fit.star$RES[,6])
+```
+
+#### predicting 2018-2019
+
+```{r}
+pre.star <- starima_pre(weekly_crime.mat[416:520,], model=fit.star)
+matplot(1:105,cbind(weekly_crime[416:520, 1],pre.star$PRE[,1]),type="l")
+```
+
+```{r}
+pre.star$NRMSE
+```
+#### fit training set from 2010 to 2019, predict 2020 to 2022 - Weekly
+
+```{r}
+fit.star2 <- starima_fit(weekly_crime.mat[1:520,],W_fit,p=1,d=0,q=2)
+```
+
+```{r}
+stacf(fit.star2$RES,weight_matrix,52)
+```
+
+```{r}
+hist(fit.star2$RES[,6])
+```
+
+#### predicting 2020 - 2022
+
+No much different for the covid period, it echoes with the hypothesis
+
+```{r}
+pre.star2 <- starima_pre(weekly_crime.mat[521:677,], model=fit.star2)
+matplot(1:157,cbind(weekly_crime[521:677, 1],pre.star2$PRE[,1]),type="l")
+```
+
+## STARIMA - Monthly
+
+```{r include=FALSE}
+crime_neigh_month <- st_read("./crime_neigh_month/crime_neigh_month.shp")
+crime_neigh_week <- st_read("./crime_neigh_week/crime_neigh_week.shp")
+
+crime_neigh_month_df <- as.data.frame(crime_neigh_month)
+crime_neigh_month_df <- crime_neigh_month_df[, -ncol(crime_neigh_month_df)]
+transposed_df <- as.data.frame(t(crime_neigh_month_df))
+transposed_df <- data.frame(Month = rownames(transposed_df), transposed_df)
+
+colnames(transposed_df) <- transposed_df[1, ]
+transposed_df <- transposed_df[-1, ]
+transposed_df <- transposed_df[, -1] 
+transposed_df <- data.frame(lapply(transposed_df, as.numeric))
+
+nb <- poly2nb(crime_neigh_month, queen = TRUE, snap = 0.1)
+weight_matrix <- nb2mat(nb, style = "W", zero.policy = TRUE)
+weight_matrix <- as.matrix(weight_matrix)
+rownames(weight_matrix) <- crime_neigh_month$name
+colnames(weight_matrix) <- crime_neigh_month$name
+
+monthly_crime <- transposed_df
+```
+
+#### STACF
+
+```{r}
+monthly_crime.mat <- as.matrix(monthly_crime)
+stacf(monthly_crime.mat, weight_matrix, 36)
+```
+Strong autocorrelation with next value, and quickly drop down but all above the significance level
+
+```{r}
+monthly_crime.mat.diff <- diff(monthly_crime.mat,lag=1,differences=1)
+stacf(monthly_crime.mat.diff, weight_matrix, 36)
+```
+
+#### STPACF
+
+```{r}
+stpacf(monthly_crime.mat, weight_matrix, 52)
+```
+
+```{r}
+stpacf(monthly_crime.mat.diff, weight_matrix, 52)
+```
+
+#### Fitting STARIMA (2010-2017) predict (2018-2019) - monthly
+
+```{r}
+W_fit<-list(w1=weight_matrix)
+# best parameters
+fit.star <- starima_fit(monthly_crime.mat[1:97,],W_fit,p=1,d=0,q=3)
+```
+
+```{r}
+stacf(fit.star$RES,weight_matrix,52)
+```
+
+```{r}
+hist(fit.star$RES[,6])
+```
+
+#### predicting 2018-2019
+
+```{r}
+pre.star <- starima_pre(monthly_crime.mat[98:122,], model=fit.star)
+matplot(1:25,cbind(monthly_crime[98:122, 1],pre.star$PRE[,1]),type="l")
+```
+
+```{r}
+pre.star$NRMSE
+```
+
+#### fit training set from 2010 to 2019, predict 2020 to 2022 - monthly
+
+```{r}
+fit.star2 <- starima_fit(monthly_crime.mat[1:121,],W_fit,p=1,d=0,q=3)
+```
+
+```{r}
+stacf(fit.star2$RES,weight_matrix,52)
+```
+
+```{r}
+hist(fit.star2$RES[,6])
+```
+
+#### predicting 2020 - 2022
+
+No much different for the covid period, it echoes with the hypothesis
+
+```{r}
+pre.star2 <- starima_pre(weekly_crime.mat[122:156,], model=fit.star2)
+matplot(1:35,cbind(weekly_crime[122:156, 1],pre.star2$PRE[,1]),type="l")
+```
+
+```{r}
+pre.star2$NRMSE
+```
