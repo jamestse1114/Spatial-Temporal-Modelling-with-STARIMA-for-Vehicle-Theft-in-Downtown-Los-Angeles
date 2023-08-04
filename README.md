@@ -4,7 +4,7 @@ This repository is dedicated to the research and analysis of vehicle theft in do
 
 ## Dataset Description
 
-The analysis utilizes crime data derived from a populous US city. This data incorporates the time, location, and nature of crime events documented over a decade. For ease of analysis, the raw data has been aggregated weekly for each neighbourhood within the city.
+The analysis utilizes crime data derived from a populous US city - Downtown Los Angeles. This data incorporates the time, location, and nature of crime events documented over a decade. For ease of analysis, the raw data has been aggregated weekly for each neighbourhood within the city.
 
 ## Methodology
 
