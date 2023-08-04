@@ -31,11 +31,3 @@ This analysis provided insights into the spatio-temporal patterns of crime in th
 ## Usage
 
 To use this code, clone this GitHub repository and open the `.R` files in your R environment. Make sure to install all the necessary R packages using `install.packages()`.
-
-## Contributing
-
-If you'd like to contribute, please fork the repository and make changes as you'd like. Pull requests are warmly welcome.
-
-## License
-
-This project is open source, under the terms of the [MIT license](https://choosealicense.com/licenses/mit/).
