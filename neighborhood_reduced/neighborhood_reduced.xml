@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?><metadata>
+    <idinfo>
+        <citation>
+            <citeinfo>
+                <pubdate>20161007</pubdate>
+                <title>LA Times Neighborhood Boundaries within the City of Los Angeles</title>
+                <othercit>The neighborhoods shown in this dataset are derived from a larger dataset drawn and maintained by the Data Desk, a team of Times reporters and Web developers in downtown L.A. The boundaries have expanded and shifted over time and now cover all of Los Angeles County broken down into 272 neighborhoods.
+
+This version of the LA Times boundaries only includes neighborhoods fully or partially within the City of Los Angeles. Neighborhoods that extend into other cities have been clipped to only show the portion(s) of the neighborhoods that are within the City of Los Angeles.</othercit>
+            </citeinfo>
+        </citation>
+        <descript>
+            <abstract>Description: The neighborhoods shown in this dataset are derived from a larger dataset drawn and maintained by the Data Desk, a team of Times reporters and Web developers in downtown L.A. The boundaries have expanded and shifted over time and now cover all of Los Angeles County broken down into 272 neighborhoods.This version of the LA Times boundaries only includes neighborhoods fully or partially within the City of Los Angeles. Neighborhoods that extend into other cities have been clipped to only show the portion(s) of the neighborhoods that are within the City of Los Angeles.Data Source: Los Angeles Times' Mapping LA project.Last Updated: October 7, 2016Refresh Rate: Never - Historical data (Note: should the LA Times update their Mapping LA project with new boundaries in the future, a new LA-specific layer will be added to the GeoHub as well.)</abstract>
+            <purpose>This layer is a filtered version of the Los Angeles Times neighborhood boundaries that only includes boundaries of neighborhoods fully or partially within the City of Los Angeles.</purpose>
+        </descript>
+        <keywords>
+            <theme>
+                <themekt>None</themekt>
+                <themekey>neighborhoods</themekey>
+            </theme>
+        </keywords>
+        <accconst>None</accconst>
+        <useconst>This work is licensed under a Creative Commons Attribution 4.0 International License</useconst>
+        <datacred>Los Angeles Times</datacred>
+    </idinfo>
+    <metainfo>
+        <metd>20190131</metd>
+        <metc>
+            <cntinfo>
+                <!--no contact person or organization name available-->
+            </cntinfo>
+        </metc>
+        <metstdn>FGDC Content Standard for Digital Geospatial Metadata</metstdn>
+        <metstdv>FGDC-STD-001-1998</metstdv>
+        <mettc>local time</mettc>
+    </metainfo>
+</metadata>
