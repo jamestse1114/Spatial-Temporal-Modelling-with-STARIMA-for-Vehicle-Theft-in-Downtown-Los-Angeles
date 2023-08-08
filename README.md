@@ -17,8 +17,8 @@ The analysis utilizes crime data derived from a populous US city - Downtown Los 
 4. **Autocorrelation Examination:** The ACF and PACF were applied to the STL residuals to investigate the temporal autocorrelation present in the data.
 
 5. **Spatial Autocorrelation Examination:** We computed and interpreted both Global and Local Moran's I to investigate spatial autocorrelation.
-6. 
-7. **STARIMA Modeling:** STARIMA modelling was applied to the data with the intention of capturing the spatiotemporal autocorrelation.
+  
+6. **STARIMA Modelling:** STARIMA modelling was applied to the data with the intention of capturing the spatiotemporal autocorrelation.
 
 ## Code
 
